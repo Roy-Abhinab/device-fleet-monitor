@@ -1,29 +1,28 @@
 """Mini Device Fleet Monitor API.
 
 Endpoints:
-    POST /devices                     register a device
-    POST /devices/{device_id}/heartbeat   record a heartbeat
-    GET  /devices                     list all devices (optionally filter by status)
-    GET  /devices/{device_id}         get a single device's details
-    GET  /summary                     fleet-wide online/offline counts
-    GET  /health                      basic liveness check
+    POST /devices                          register a device
+    POST /devices/<device_id>/heartbeat    record a heartbeat
+    GET  /devices                          list all devices (optional ?status= filter)
+    GET  /devices/<device_id>              get a single device's details
+    GET  /summary                          fleet-wide online/offline counts
+    GET  /health                           basic liveness check
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from flask import Flask, jsonify, request
 
 from .models import (
-    DeviceDetailResponse,
     DeviceRegisterRequest,
-    DeviceSummaryResponse,
-    FleetSummaryResponse,
     HeartbeatRequest,
+    ValidationError,
+    device_to_detail,
+    device_to_summary,
 )
-from .store import Device, store, utcnow
+from .store import store, utcnow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,98 +30,73 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fleet_monitor")
 
-app = FastAPI(
-    title="Mini Device Fleet Monitor",
-    description="Tracks heartbeats from a fleet of simulated devices.",
-    version="1.0.0",
-)
 
+def create_app() -> Flask:
+    app = Flask(__name__)
 
-def _to_summary(device: Device) -> DeviceSummaryResponse:
-    return DeviceSummaryResponse(
-        id=device.id,
-        name=device.name,
-        status=device.computed_status(),
-        last_heartbeat=device.last_heartbeat,
-    )
+    @app.errorhandler(ValidationError)
+    def handle_validation_error(exc: ValidationError):
+        return jsonify({"error": str(exc)}), 422
 
+    @app.post("/devices")
+    def register_device():
+        payload = DeviceRegisterRequest.from_json(request.get_json(silent=True))
+        try:
+            device = store.register(payload.id, payload.name)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 409
+        logger.info("registered device id=%s name=%s", device.id, device.name)
+        return jsonify(device_to_detail(device)), 201
 
-def _to_detail(device: Device) -> DeviceDetailResponse:
-    return DeviceDetailResponse(
-        id=device.id,
-        name=device.name,
-        status=device.computed_status(),
-        last_heartbeat=device.last_heartbeat,
-        registered_at=device.registered_at,
-        reported_status=device.reported_status,
-        metrics=device.metrics,
-    )
-
-
-@app.post("/devices", response_model=DeviceDetailResponse, status_code=201)
-def register_device(payload: DeviceRegisterRequest) -> DeviceDetailResponse:
-    """Register a new device. 409 if the id is already taken."""
-    try:
-        device = store.register(payload.id, payload.name)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    logger.info("registered device id=%s name=%s", device.id, device.name)
-    return _to_detail(device)
-
-
-@app.post("/devices/{device_id}/heartbeat", response_model=DeviceDetailResponse)
-def receive_heartbeat(device_id: str, payload: HeartbeatRequest) -> DeviceDetailResponse:
-    """Record a heartbeat for a registered device. 404 if unknown."""
-    try:
-        device = store.record_heartbeat(
-            device_id,
-            payload.timestamp,
-            payload.status,
-            payload.extra_metrics(),
+    @app.post("/devices/<device_id>/heartbeat")
+    def receive_heartbeat(device_id: str):
+        payload = HeartbeatRequest.from_json(request.get_json(silent=True))
+        try:
+            device = store.record_heartbeat(
+                device_id, payload.timestamp, payload.status, payload.metrics
+            )
+        except KeyError:
+            return jsonify({"error": f"device '{device_id}' not found"}), 404
+        logger.info(
+            "heartbeat device_id=%s reported_status=%s", device.id, payload.status
         )
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=404, detail=f"device '{device_id}' not found"
-        ) from exc
-    logger.info(
-        "heartbeat device_id=%s reported_status=%s", device.id, payload.status
-    )
-    return _to_detail(device)
+        return jsonify(device_to_detail(device)), 200
+
+    @app.get("/devices")
+    def list_devices():
+        status_filter = request.args.get("status")
+        if status_filter is not None and status_filter not in ("ONLINE", "OFFLINE"):
+            return jsonify({"error": "'status' must be ONLINE or OFFLINE"}), 422
+        summaries = [device_to_summary(d) for d in store.list_all()]
+        if status_filter:
+            summaries = [s for s in summaries if s["status"] == status_filter]
+        return jsonify(summaries), 200
+
+    @app.get("/devices/<device_id>")
+    def get_device(device_id: str):
+        device = store.get(device_id)
+        if device is None:
+            return jsonify({"error": f"device '{device_id}' not found"}), 404
+        return jsonify(device_to_detail(device)), 200
+
+    @app.get("/summary")
+    def fleet_summary():
+        devices = store.list_all()
+        online = sum(1 for d in devices if d.computed_status() == "ONLINE")
+        total = len(devices)
+        return (
+            jsonify({"total": total, "online": online, "offline": total - online}),
+            200,
+        )
+
+    @app.get("/health")
+    def health():
+        return jsonify({"status": "ok", "time": utcnow().isoformat()}), 200
+
+    return app
 
 
-@app.get("/devices", response_model=List[DeviceSummaryResponse])
-def list_devices(
-    status: Optional[str] = Query(
-        None,
-        pattern="^(ONLINE|OFFLINE)$",
-        description="Optional filter: ONLINE or OFFLINE",
-    )
-) -> List[DeviceSummaryResponse]:
-    """List all registered devices with their current computed status."""
-    summaries = [_to_summary(d) for d in store.list_all()]
-    if status:
-        summaries = [s for s in summaries if s.status == status]
-    return summaries
+app = create_app()
 
-
-@app.get("/devices/{device_id}", response_model=DeviceDetailResponse)
-def get_device(device_id: str) -> DeviceDetailResponse:
-    """Get full details for a single device. 404 if unknown."""
-    device = store.get(device_id)
-    if device is None:
-        raise HTTPException(status_code=404, detail=f"device '{device_id}' not found")
-    return _to_detail(device)
-
-
-@app.get("/summary", response_model=FleetSummaryResponse)
-def fleet_summary() -> FleetSummaryResponse:
-    """Fleet-wide counts of total/online/offline devices."""
-    devices = store.list_all()
-    online = sum(1 for d in devices if d.computed_status() == "ONLINE")
-    total = len(devices)
-    return FleetSummaryResponse(total=total, online=online, offline=total - online)
-
-
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok", "time": utcnow().isoformat()}
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)

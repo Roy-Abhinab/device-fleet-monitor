@@ -1,6 +1,6 @@
-fastapi>=0.110
-uvicorn[standard]>=0.27
-pydantic>=2.5
+Flask>=3.0
 requests>=2.31
+
+# Optional: only needed if you'd rather run the tests with pytest instead of
+# `python -m unittest`. The test suite works with either.
 pytest>=8.0
-httpx>=0.26
