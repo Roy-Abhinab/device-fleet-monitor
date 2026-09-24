@@ -100,6 +100,14 @@ from each every 5 seconds. While it's running:
 Flags: `--url` (API base URL), `--count` (number of devices), `--interval`
 (seconds between heartbeats).
 
+### Optional enhancements included
+
+- `GET /devices?status=ONLINE` (or `OFFLINE`) filters the fleet listing.
+- Structured request logging (registrations and heartbeats are logged with
+  a timestamp, level, and device id).
+- The server port is configurable via the `PORT` environment variable
+  (defaults to 8000): `PORT=9000 python run.py`.
+
 ## Run the tests
 
 Either works, no third-party test runner required:
