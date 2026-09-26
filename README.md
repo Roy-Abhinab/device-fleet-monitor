@@ -220,8 +220,4 @@ I used Claude while building this project. Specifically:
   stopped device actually flip to `OFFLINE` after the timeout, rather than
   just trusting that the code should work.
 
-**Note for whoever is filling in their own copy of this section:** replace
-the bullet points above with what you *personally* did — which parts you
-wrote yourself vs. generated, what you changed or rejected, and what you
-verified by actually running it before submitting. That's the point of
-this section per the assignment.
+
